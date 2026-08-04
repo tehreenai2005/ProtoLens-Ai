@@ -6,7 +6,7 @@ from PIL import Image, ImageStat, ImageOps
 
 # 1. Page Configuration
 st.set_page_config(
-    page_title="AI Prototype Reviewer — IIUI",
+    page_title="ProtoLens AI — IIUI",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -305,8 +305,8 @@ if st.session_state.page == "main":
         <div style="color: #60A5FA; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.85rem; margin-bottom: 0.5rem;">
             International Islamic University Islamabad
         </div>
-        <div class="hero-title">AI Prototype Reviewer</div>
-        <div class="hero-subtitle">B.E Tech(AI) Final Year Capstone Project</div>
+        <div class="hero-title">ProtoLens AI</div>
+        <div class="hero-subtitle">B.E Tech(AI)</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -401,7 +401,7 @@ elif st.session_state.page == "dashboard":
             """, unsafe_allow_html=True)
 
         st.divider()
-        st.caption("IIUI B.E Tech(AI) Final Project")
+        st.caption("          IIUI B.E Tech(AI)          ")
 
     # Dashboard Header
     st.markdown("""
@@ -537,7 +537,7 @@ elif st.session_state.page == "dashboard":
             with tabs[4]:
                 st.markdown("### Download Artifacts")
                 report_data = {
-                    "project_name": "AI Prototype Reviewer",
+                    "project_name": "ProtoLens AI",
                     "file_analyzed": uploaded_file.name,
                     "dimensions": results['dimensions'],
                     "overall_score": results['overall_score'],
