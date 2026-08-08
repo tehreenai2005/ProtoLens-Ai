@@ -1,8 +1,10 @@
 import streamlit as st
 import time
 import json
-import numpy as np
-from PIL import Image, ImageStat, ImageOps
+import zipfile
+import io
+import re
+import os
 
 # 1. Page Configuration
 st.set_page_config(
@@ -19,129 +21,194 @@ if "page" not in st.session_state:
 if "audit_complete" not in st.session_state:
     st.session_state.audit_complete = False
 
-if "last_image_hash" not in st.session_state:
-    st.session_state.last_image_hash = None
+if "last_file_hash" not in st.session_state:
+    st.session_state.last_file_hash = None
 
 if "dynamic_results" not in st.session_state:
     st.session_state.dynamic_results = None
 
-# 3. Dynamic Image Analysis Helper Engine
-def analyze_ui_image(image: Image.Image, target_platform: str, compliance_standard: str):
-    """Dynamically evaluates uploaded UI image based on visual attributes, dimensions, and color space."""
-    img_gray = ImageOps.grayscale(image)
-    stat = ImageStat.Stat(img_gray)
-    mean_brightness = stat.mean[0]
-    std_dev = stat.stddev[0]
-    
-    width, height = image.size
-    aspect_ratio = round(width / height, 2)
-    
-    # Calculate dominant colors / color variation
-    img_rgb = image.convert('RGB')
-    colors = img_rgb.getcolors(maxcolors=100000)
-    color_count = len(colors) if colors else 50000
-    
-    # Calculate contrast score estimate based on image standard deviation
-    contrast_ratio = round(min(21.0, max(1.5, (std_dev / 10.0) * 2.5)), 1)
-    
-    # Compute dynamic score algorithm
-    base_score = 70
-    score_modifier = int((std_dev / 128.0) * 15) + (5 if 0.4 <= aspect_ratio <= 2.2 else -5)
-    overall_score = min(98, max(52, base_score + score_modifier))
-    
-    ui_consistency = min(96, max(60, int(80 + (color_count / 10000) - (std_dev / 5))))
-    wcag_compliance = min(100, max(45, int((contrast_ratio / 4.5) * 75)))
-    
-    is_dark_theme = mean_brightness < 128
-    
-    # Generate dynamic issues based on image properties
-    issues = []
-    
-    if contrast_ratio < 4.5:
-        issues.append({
-            "category": "Accessibility",
-            "severity": "CRITICAL",
-            "title": "Low Color Contrast Violation",
-            "agent": "Accessibility Agent",
-            "badge": "badge-critical",
-            "class": "issue-card-critical",
-            "desc": f"Measured global contrast factor is {contrast_ratio}:1. Fails {compliance_standard} minimum requirement of 4.5:1."
-        })
-    else:
-        issues.append({
-            "category": "Accessibility",
-            "severity": "PASS",
-            "title": "Sufficient Color Contrast",
-            "agent": "Accessibility Agent",
-            "badge": "badge-warning",
-            "class": "issue-card-warning",
-            "desc": f"Measured contrast ratio is {contrast_ratio}:1, which meets baseline readability targets for {compliance_standard}."
-        })
-        
-    if aspect_ratio < 0.6 and "Desktop" in target_platform:
-        issues.append({
-            "category": "UI",
-            "severity": "WARNING",
-            "title": "Platform Aspect Ratio Mismatch",
-            "agent": "UI Agent",
-            "badge": "badge-warning",
-            "class": "issue-card-warning",
-            "desc": f"Image aspect ratio ({aspect_ratio}) resembles a tall mobile viewport, but target platform is set to '{target_platform}'."
-        })
-    elif aspect_ratio > 1.4 and "Mobile" in target_platform:
-        issues.append({
-            "category": "UI",
-            "severity": "WARNING",
-            "title": "Mobile Viewport Layout Overwidth",
-            "agent": "UI Agent",
-            "badge": "badge-warning",
-            "class": "issue-card-warning",
-            "desc": f"Wide layout detected ({width}x{height}px). Recommended to optimize padding for mobile touch target compliance."
-        })
-    else:
-        issues.append({
-            "category": "UI",
-            "severity": "INFO",
-            "title": "Grid & Alignment Calibration",
-            "agent": "UI Agent",
-            "badge": "badge-warning",
-            "class": "issue-card-warning",
-            "desc": f"Analyzed canvas size {width}x{height}px. UI component grids are aligned to standard margin baseline."
-        })
 
-    if is_dark_theme:
-        issues.append({
-            "category": "UX",
-            "severity": "INFO",
-            "title": "Dark Mode Interface Detected",
-            "agent": "UX Agent",
-            "badge": "badge-warning",
-            "class": "issue-card-warning",
-            "desc": f"Mean surface luminance measured at {round(mean_brightness, 1)}/255. Verify interactive button focus rings on dark backgrounds."
-        })
-    else:
-        issues.append({
-            "category": "UX",
-            "severity": "INFO",
-            "title": "Light Theme Surface Palette",
-            "agent": "UX Agent",
-            "badge": "badge-warning",
-            "class": "issue-card-warning",
-            "desc": f"Mean surface luminance measured at {round(mean_brightness, 1)}/255. Ensure active CTA buttons maintain clear visual hierarchy."
-        })
+# 3. Code Quality & Deficiency Analysis Engine
+def analyze_codebase_zip(zip_bytes, target_domain: str, compliance_standard: str):
+    """
+    Parses uploaded ZIP archive for source code quality, architecture checks,
+    and granular code deficiencies (secrets, error handling, debug statements, etc.).
+    """
+    
+    files_found = []
+    total_size = 0
+    file_contents = {}
 
-    return {
-        "dimensions": f"{width}x{height}px",
-        "overall_score": overall_score,
-        "ui_consistency": f"{ui_consistency}%",
-        "wcag_compliance": f"{wcag_compliance}%",
-        "contrast_ratio": contrast_ratio,
-        "is_dark_theme": is_dark_theme,
-        "friction_index": "Low" if overall_score > 75 else "Moderate",
-        "issues": issues
+    lang_map = {
+        'py': 'Python', 'js': 'JavaScript', 'ts': 'TypeScript', 'jsx': 'React JS',
+        'tsx': 'React TS', 'cpp': 'C++', 'c': 'C', 'h': 'C/C++ Header',
+        'java': 'Java', 'cs': 'C#', 'php': 'PHP', 'rb': 'Ruby', 'go': 'Go',
+        'rs': 'Rust', 'html': 'HTML', 'css': 'CSS', 'sql': 'SQL', 'sh': 'Shell'
     }
 
-# 4. Custom CSS (Deep Navy Blue Color Palette & Conditional Sidebar)
+    detected_languages = set()
+    has_readme = False
+    has_dependencies = False
+    has_tests = False
+    has_config = False
+    has_gitignore = False
+
+    issues = []
+
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+        for info in z.infolist():
+            if not info.is_dir():
+                filename = os.path.basename(info.filename)
+                files_found.append(info.filename)
+                total_size += info.file_size
+                
+                ext = info.filename.split('.')[-1].lower() if '.' in info.filename else ''
+                if ext in lang_map:
+                    detected_languages.add(lang_map[ext])
+
+                filename_lower = filename.lower()
+                if 'readme' in filename_lower:
+                    has_readme = True
+                if filename_lower in ['requirements.txt', 'package.json', 'pyproject.toml', 'cargo.toml', 'build.gradle', 'pom.xml', 'go.mod', 'cmakelists.txt', 'setup.py']:
+                    has_dependencies = True
+                if 'test' in filename_lower or info.filename.startswith('tests/'):
+                    has_tests = True
+                if filename_lower in ['.env.example', 'dockerfile', 'docker-compose.yml', 'config.json', 'settings.py']:
+                    has_config = True
+                if '.gitignore' in filename_lower:
+                    has_gitignore = True
+
+                # Code file content analysis
+                if ext in ['py', 'js', 'ts', 'jsx', 'tsx', 'html', 'css', 'cpp', 'c', 'java', 'php', 'go', 'json']:
+                    try:
+                        content = z.read(info.filename).decode('utf-8', errors='ignore')
+                        file_contents[info.filename] = content
+                    except Exception:
+                        pass
+
+    # --- CODE-LEVEL DEFICIENCY CHECKS ---
+    secrets_count = 0
+    print_debug_count = 0
+    bare_except_count = 0
+    oversized_files = []
+
+    for filepath, content in file_contents.items():
+        lines = content.splitlines()
+
+        # Check 1: Large file size (Deficiency)
+        if len(lines) > 300:
+            oversized_files.append((filepath, len(lines)))
+
+        # Check 2: Hardcoded Secrets (Critical Deficiency)
+        if re.search(r'(api_key|secret_key|password|bearer|auth_token)\s*=\s*["\'][A-Za-z0-9_\-]{8,}["\']', content, re.IGNORECASE):
+            secrets_count += 1
+            issues.append({
+                "category": "Security Defect",
+                "severity": "CRITICAL",
+                "title": f"Hardcoded Secrets in `{os.path.basename(filepath)}`",
+                "agent": "Reasoning Agent",
+                "badge": "badge-critical",
+                "class": "issue-card-critical",
+                "desc": f"Potential API keys, credentials, or tokens hardcoded in `{filepath}`. Move credentials to an environment file (.env)."
+            })
+
+        # Check 3: Bare Exceptions / Poor Error Handling
+        if re.search(r'except\s*:', content) or re.search(r'catch\s*\(\s*e\s*\)\s*\{\s*\}', content):
+            bare_except_count += 1
+            issues.append({
+                "category": "Code Quality Defect",
+                "severity": "WARNING",
+                "title": f"Weak Error Handling in `{os.path.basename(filepath)}`",
+                "agent": "UX Agent",
+                "badge": "badge-warning",
+                "class": "issue-card-warning",
+                "desc": f"Found bare `except:` or empty catch block in `{filepath}`. Suppressing errors leads to silent execution failures."
+            })
+
+        # Check 4: Leftover Debugging Statements
+        debug_matches = len(re.findall(r'print\(|console\.log\(', content))
+        if debug_matches > 3:
+            print_debug_count += debug_matches
+            issues.append({
+                "category": "Code Hygiene",
+                "severity": "WARNING",
+                "title": f"Excessive Debug Logging in `{os.path.basename(filepath)}`",
+                "agent": "UI Agent",
+                "badge": "badge-warning",
+                "class": "issue-card-warning",
+                "desc": f"Identified {debug_matches} unhandled `print()` or `console.log()` statements in `{filepath}`. Replace with standard logging framework."
+            })
+
+    # --- ARCHITECTURE DEFICIENCY CHECKS ---
+    if not has_readme:
+        issues.append({
+            "category": "Documentation Defect",
+            "severity": "CRITICAL",
+            "title": "Missing Documentation (README)",
+            "agent": "Product Agent",
+            "badge": "badge-critical",
+            "class": "issue-card-critical",
+            "desc": "No README found. Project lacks setup instructions, usage guidelines, or software overview."
+        })
+
+    if not has_dependencies:
+        issues.append({
+            "category": "Build Defect",
+            "severity": "CRITICAL",
+            "title": "Missing Package Dependency Manifest",
+            "agent": "Architecture Agent",
+            "badge": "badge-critical",
+            "class": "issue-card-critical",
+            "desc": "Missing `requirements.txt`, `package.json`, or equivalent manifest. Third-party packages cannot be restored."
+        })
+
+    if not has_tests:
+        issues.append({
+            "category": "Testing Defect",
+            "severity": "WARNING",
+            "title": "No Automated Unit Tests Identified",
+            "agent": "Accessibility Agent",
+            "badge": "badge-warning",
+            "class": "issue-card-warning",
+            "desc": "No test directory or test suites detected. Software changes cannot be validated automatically."
+        })
+
+    if oversized_files:
+        for fname, lcount in oversized_files[:2]:
+            issues.append({
+                "category": "Maintainability Defect",
+                "severity": "WARNING",
+                "title": f"Oversized File (`{os.path.basename(fname)}`)",
+                "agent": "Architecture Agent",
+                "badge": "badge-warning",
+                "class": "issue-card-warning",
+                "desc": f"`{fname}` spans {lcount} lines. High complexity file; refactor into smaller modular helper scripts."
+            })
+
+    # Scoring & Metrics Calculation
+    critical_defects = sum(1 for i in issues if i["severity"] == "CRITICAL")
+    warning_defects = sum(1 for i in issues if i["severity"] == "WARNING")
+    
+    deductions = (critical_defects * 15) + (warning_defects * 5)
+    overall_score = max(20, min(98, 100 - deductions))
+    architecture_rating = "High Quality" if overall_score >= 80 else "Needs Improvement" if overall_score >= 50 else "Critical Deficiencies"
+    primary_languages = ", ".join(list(detected_languages)[:4]) if detected_languages else "Generic Code"
+
+    return {
+        "file_count": len(files_found),
+        "total_size_kb": f"{round(total_size / 1024, 1)} KB",
+        "primary_languages": primary_languages,
+        "overall_score": overall_score,
+        "architecture_rating": architecture_rating,
+        "critical_count": critical_defects,
+        "warning_count": warning_defects,
+        "total_issues_count": len(issues),
+        "issues": issues,
+        "file_list": files_found[:15]
+    }
+
+
+# 4. Custom CSS
 hide_sidebar_css = ""
 if st.session_state.page == "main":
     hide_sidebar_css = """
@@ -157,19 +224,16 @@ st.markdown(f"""
 <style>
     {hide_sidebar_css}
 
-    /* Global Dark Navy Background & Typography */
     .stApp {{
         background-color: #0A192F;
         color: #F8FAFC;
     }}
 
-    /* Sidebar Customization (Navy Blue Shades) */
     [data-testid="stSidebar"] {{
         background-color: #0F172A !important;
         border-right: 1px solid #1E3A8A;
     }}
 
-    /* Navy Blue Cards & Containers */
     .navy-card {{
         background-color: #1E293B;
         border: 1px solid #1E3A8A;
@@ -203,7 +267,6 @@ st.markdown(f"""
         margin-bottom: 0;
     }}
 
-    /* Team Member Chip List */
     .team-card {{
         background: #0F172A;
         border: 1px solid #1E3A8A;
@@ -229,7 +292,6 @@ st.markdown(f"""
         font-weight: 600;
     }}
 
-    /* Issue Display Cards */
     .issue-card {{
         background-color: #0F172A;
         border: 1px solid #1E3A8A;
@@ -245,7 +307,6 @@ st.markdown(f"""
         border-left-color: #F59E0B;
     }}
 
-    /* Badges */
     .badge {{
         display: inline-block;
         padding: 0.2rem 0.6rem;
@@ -266,7 +327,6 @@ st.markdown(f"""
         border: 1px solid #F59E0B;
     }}
 
-    /* Streamlit UI Overrides */
     div[data-testid="stFileUploader"] {{
         background-color: #0F172A;
         border: 2px dashed #1E3A8A;
@@ -299,7 +359,6 @@ st.markdown(f"""
 # ==========================================
 if st.session_state.page == "main":
     
-    # Hero Title Box
     st.markdown("""
     <div class="hero-navy">
         <div style="color: #60A5FA; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.85rem; margin-bottom: 0.5rem;">
@@ -310,7 +369,6 @@ if st.session_state.page == "main":
     </div>
     """, unsafe_allow_html=True)
 
-    # Project & Team Overview Card
     col_info, col_team = st.columns([1, 1], gap="large")
 
     with col_info:
@@ -323,7 +381,7 @@ if st.session_state.page == "main":
             <p><strong>Official Contact Email:</strong> <br><code style="color: #93C5FD;">tehreenramesha2102005@gmail.com</code></p>
             <hr style="border-color: #1E3A8A; margin: 1.5rem 0;">
             <p style="color: #94A3B8; font-size: 0.95rem;">
-                This system provides automated agentic UI/UX inspection, usability analysis, WCAG accessibility validation, and feature completeness evaluation for interface prototypes.
+                This system provides automated agentic inspection, code deficiency auditing, vulnerability checks, and architecture scoring for any codebase.
             </p>
         </div>
         """, unsafe_allow_html=True)
@@ -357,7 +415,6 @@ if st.session_state.page == "main":
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Navigation Welcome Button
     _, btn_col, _ = st.columns([1, 2, 1])
     with btn_col:
         if st.button("🚀 Welcome to Dashboard ➔", type="primary", use_container_width=True):
@@ -370,10 +427,9 @@ if st.session_state.page == "main":
 # ==========================================
 elif st.session_state.page == "dashboard":
 
-    # Sidebar Rendering (Mandatory on Dashboard)
     with st.sidebar:
         st.markdown('<h2 style="color:#FFFFFF; margin-bottom:0;">⚡ Dashboard</h2>', unsafe_allow_html=True)
-        st.caption("AI Prototype Reviewer Execution Studio")
+        st.caption("AI Code Deficiency Audit Studio")
         st.divider()
 
         if st.button("⬅️ Back to Main Page", use_container_width=True):
@@ -383,14 +439,14 @@ elif st.session_state.page == "dashboard":
         st.divider()
         st.markdown("### 🤖 Active Agent Team")
         agents_list = [
-            ("👁️ Vision Agent", "Layout & Bounding Boxes"),
-            ("📝 OCR Agent", "Text String Extraction"),
-            ("🎨 UI Agent", "Grid, Styles & Spacing"),
-            ("🧠 UX Agent", "User Journey & Interaction"),
-            ("♿ Accessibility Agent", "WCAG Contrast & Target Rules"),
-            ("📋 Product Agent", "Feature Completeness"),
-            ("⚖️ Reasoning Agent", "Conflict Resolution"),
-            ("📄 Report Agent", "PDF/JSON Synthesis")
+            ("👁️ Vision Agent", "File Hierarchy & Archive Inspector"),
+            ("📝 OCR Agent", "Source Code Content Parser"),
+            ("🎨 UI Agent", "Code Hygiene & Style Inspector"),
+            ("🧠 UX Agent", "Error Handling & Logic Auditor"),
+            ("♿ Accessibility Agent", "Security & Secret Scanner"),
+            ("📋 Product Agent", "Manifest & Documentation Inspector"),
+            ("⚖️ Reasoning Agent", "Risk & Deficiency Evaluator"),
+            ("📄 Report Agent", "Deficiency JSON Synthesis")
         ]
         for name, role in agents_list:
             st.markdown(f"""
@@ -403,154 +459,142 @@ elif st.session_state.page == "dashboard":
         st.divider()
         st.caption("          IIUI B.E Tech(AI)          ")
 
-    # Dashboard Header
     st.markdown("""
     <div style="background:#1E293B; border:1px solid #1E3A8A; border-radius:12px; padding:1.5rem 2rem; margin-bottom:1.8rem;">
-        <h2 style="color:#FFFFFF; margin:0;">📊 Agentic Inspection Studio</h2>
-        <p style="color:#93C5FD; margin:0.3rem 0 0 0;">Upload your prototype to execute parallel visual, accessibility, and user-flow evaluations.</p>
+        <h2 style="color:#FFFFFF; margin:0;">📊 Dynamic Code Deficiency Inspection Studio</h2>
+        <p style="color:#93C5FD; margin:0.3rem 0 0 0;">Upload any software project source code (.ZIP archive) to execute deep static code analysis and identify critical deficiencies.</p>
     </div>
     """, unsafe_allow_html=True)
 
-    # Upload & Control Panel
     uploaded_file = st.file_uploader(
-        "Upload Prototype / UI Screenshot (PNG, JPG, JPEG)",
-        type=["png", "jpg", "jpeg"]
+        "Upload Source Code Archive (.ZIP)",
+        type=["zip"]
     )
 
     if uploaded_file is not None:
-        # Reset state if a new file is uploaded
         current_hash = hash(uploaded_file.name + str(uploaded_file.size))
-        if st.session_state.last_image_hash != current_hash:
-            st.session_state.last_image_hash = current_hash
+        if st.session_state.last_file_hash != current_hash:
+            st.session_state.last_file_hash = current_hash
             st.session_state.audit_complete = False
             st.session_state.dynamic_results = None
 
         col_img, col_ctrl = st.columns([1, 1], gap="large")
 
         with col_img:
-            st.markdown("### 📷 Uploaded Prototype")
-            image = Image.open(uploaded_file)
-            st.image(image, use_container_width=True)
+            st.markdown("### 📦 Uploaded Code Archive")
+            st.info(f"**File:** {uploaded_file.name}\n\n**Size:** {round(uploaded_file.size / 1024, 2)} KB")
 
         with col_ctrl:
-            st.markdown("### ⚙️ Inspection Settings")
-            target_platform = st.selectbox(
-                "Target Platform",
-                ["Mobile (iOS/Android)", "Desktop Web", "Tablet UI", "SaaS Dashboard"]
+            st.markdown("### ⚙️ Audit Configuration")
+            target_domain = st.selectbox(
+                "Project Context",
+                ["Web Application", "Machine Learning / AI", "Mobile Application", "API / Backend Service", "Desktop Application", "Embedded / C++ Code"]
             )
             compliance_standard = st.selectbox(
-                "Accessibility Goal",
-                ["WCAG 2.1 AA", "WCAG 2.1 AAA", "Section 508"]
+                "Deficiency Review Standard",
+                ["Strict Code Quality Standard", "Production Readiness Standard", "Basic Student Prototype Standard"]
             )
 
             st.markdown("<br>", unsafe_allow_html=True)
 
-            if st.button("🚀 Run Agentic Review Pipeline", type="primary", use_container_width=True):
+            if st.button("🚀 Run Code Deficiency Audit", type="primary", use_container_width=True):
                 st.divider()
                 progress_bar = st.progress(0)
                 status_text = st.empty()
 
                 agents_flow = [
-                    ("👁️ Vision Agent", "Scanning image bounding boxes and layout structure...", 0.15),
-                    ("📝 OCR Agent", "Extracting image pixel regions & textual elements...", 0.30),
-                    ("🎨 UI Review Agent", "Analyzing image aspect ratio, resolution, and padding...", 0.45),
-                    ("🧠 UX Review Agent", "Evaluating screen luminance and interaction cues...", 0.60),
-                    ("♿ Accessibility Agent", "Testing image contrast spectrum & accessibility targets...", 0.75),
-                    ("📋 Product Agent", "Verifying feature completeness...", 0.85),
-                    ("⚖️ Reasoning Agent", "Consolidating dynamic findings...", 0.95),
-                    ("📄 Report Agent", "Generating dynamic audit summary and JSON deliverables...", 1.00),
+                    ("👁️ Vision Agent", "Extracting archive hierarchy...", 0.15),
+                    ("📝 OCR Agent", "Reading source code contents...", 0.30),
+                    ("🎨 UI Agent", "Checking debug statements & formatting...", 0.45),
+                    ("🧠 UX Agent", "Inspecting error handling and try/catch blocks...", 0.60),
+                    ("♿ Accessibility Agent", "Scanning for hardcoded API keys & secrets...", 0.75),
+                    ("📋 Product Agent", "Checking README and dependency manifests...", 0.85),
+                    ("⚖️ Reasoning Agent", "Calculating deficiency scores and deductions...", 0.95),
+                    ("📄 Report Agent", "Generating deficiency JSON report...", 1.00),
                 ]
 
                 for agent_name, desc, step_pct in agents_flow:
                     status_text.markdown(f"**{agent_name}:** {desc}")
                     progress_bar.progress(step_pct)
-                    time.sleep(0.35)
+                    time.sleep(0.3)
 
-                # Process image dynamically
-                st.session_state.dynamic_results = analyze_ui_image(image, target_platform, compliance_standard)
-                status_text.success("✅ Multi-Agent Audit Completed for Uploaded Prototype!")
+                zip_bytes = uploaded_file.getvalue()
+                st.session_state.dynamic_results = analyze_codebase_zip(zip_bytes, target_domain, compliance_standard)
+                status_text.success("✅ Code Deficiency Audit Completed!")
                 st.session_state.audit_complete = True
 
-        # Results Section
         if st.session_state.audit_complete and st.session_state.dynamic_results:
             results = st.session_state.dynamic_results
             st.divider()
-            st.markdown(f"## 📈 Review Metrics & Findings for `{uploaded_file.name}` ({results['dimensions']})")
+            st.markdown(f"## 📈 Deficiency Findings & Metrics for `{uploaded_file.name}`")
 
             m1, m2, m3, m4 = st.columns(4)
             with m1:
-                st.metric(label="Overall Score", value=f"{results['overall_score']}/100")
+                st.metric(label="Quality Score", value=f"{results['overall_score']}/100")
             with m2:
-                st.metric(label="Visual Consistency", value=results['ui_consistency'])
+                st.metric(label="Status", value=results['architecture_rating'])
             with m3:
-                st.metric(label="UX Friction Index", value=results['friction_index'])
+                st.metric(label="Deficiencies Found", value=results['total_issues_count'], delta=f"-{results['critical_count']} Critical", delta_color="inverse")
             with m4:
-                st.metric(label="WCAG Compliance", value=results['wcag_compliance'])
+                st.metric(label="Files Scanned", value=results['file_count'])
 
             tabs = st.tabs([
+                "🚨 Identified Deficiencies", 
                 "📌 Executive Summary", 
-                "🎨 UI & UX Breakdown", 
-                "♿ Accessibility Audit", 
-                "📋 Product Strategy", 
-                "📄 Export Reports"
+                "📂 Analyzed File Tree", 
+                "📄 Download Audit JSON"
             ])
 
             with tabs[0]:
-                st.markdown("### Executive Summary")
-                st.write(f"""
-                The multi-agent evaluation engine analyzed **{uploaded_file.name}** ({results['dimensions']}).
-                Theme detected: **{"Dark Mode" if results['is_dark_theme'] else "Light Mode"}**.
-                Estimated contrast ratio score: **{results['contrast_ratio']}:1**.
-                Overall evaluated interface rating is **{results['overall_score']}/100**.
-                """)
+                st.markdown("### Detected Code & Architecture Deficiencies")
+                if results['issues']:
+                    for issue in results['issues']:
+                        st.markdown(f"""
+                        <div class="issue-card {issue['class']}">
+                            <span class="badge {issue['badge']}">{issue['severity']}</span> <strong>{issue['title']}</strong><br>
+                            <em>Assigned Agent: {issue['agent']}</em><br>
+                            <span style="color:#CBD5E1;">{issue['desc']}</span>
+                        </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    st.success("🎉 No major code or architecture deficiencies detected in the uploaded project!")
 
             with tabs[1]:
-                st.markdown("### UI & UX Findings")
-                ui_issues = [i for i in results['issues'] if i['category'] in ['UI', 'UX']]
-                for issue in ui_issues:
-                    st.markdown(f"""
-                    <div class="issue-card {issue['class']}">
-                        <span class="badge {issue['badge']}">{issue['severity']}</span> <strong>{issue['title']}</strong><br>
-                        <em>{issue['agent']}:</em> {issue['desc']}
-                    </div>
-                    """, unsafe_allow_html=True)
-
-            with tabs[2]:
-                st.markdown("### Accessibility (WCAG)")
-                access_issues = [i for i in results['issues'] if i['category'] == 'Accessibility']
-                for issue in access_issues:
-                    st.markdown(f"""
-                    <div class="issue-card {issue['class']}">
-                        <span class="badge {issue['badge']}">{issue['severity']}</span> <strong>{issue['title']}</strong><br>
-                        <em>{issue['agent']}:</em> {issue['desc']}
-                    </div>
-                    """, unsafe_allow_html=True)
-
-            with tabs[3]:
-                st.markdown("### Product Completeness")
-                st.markdown(f"""
-                - 📐 **Detected Resolution:** {results['dimensions']}
-                - 🎨 **Surface Contrast Index:** {results['contrast_ratio']}:1
-                - 💡 **Recommendation:** Verify interactive tap targets across all viewport variants.
+                st.markdown("### Executive Summary")
+                st.write(f"""
+                - **Project:** `{uploaded_file.name}` ({results['total_size_kb']})
+                - **Languages Detected:** {results['primary_languages']}
+                - **Critical Vulnerabilities / Missing Manifests:** {results['critical_count']}
+                - **Code Hygiene & Quality Warnings:** {results['warning_count']}
+                - **Overall Code Base Score:** {results['overall_score']}/100
                 """)
 
-            with tabs[4]:
-                st.markdown("### Download Artifacts")
+            with tabs[2]:
+                st.markdown("### File Structure")
+                for f in results['file_list']:
+                    st.code(f, language="text")
+
+            with tabs[3]:
+                st.markdown("### Export Report")
                 report_data = {
                     "project_name": "ProtoLens AI",
                     "file_analyzed": uploaded_file.name,
-                    "dimensions": results['dimensions'],
+                    "target_domain": target_domain,
+                    "languages_detected": results['primary_languages'],
+                    "file_count": results['file_count'],
                     "overall_score": results['overall_score'],
-                    "contrast_ratio": results['contrast_ratio'],
-                    "is_dark_theme": results['is_dark_theme'],
-                    "issues": results['issues']
+                    "status": results['architecture_rating'],
+                    "total_deficiencies": results['total_issues_count'],
+                    "critical_deficiencies": results['critical_count'],
+                    "warning_deficiencies": results['warning_count'],
+                    "deficiency_details": results['issues']
                 }
                 st.download_button(
-                    label="📥 Download Dynamic JSON Deliverable",
+                    label="📥 Download Deficiency Report (JSON)",
                     data=json.dumps(report_data, indent=2),
-                    file_name=f"{uploaded_file.name}_audit_report.json",
+                    file_name=f"{uploaded_file.name}_deficiency_report.json",
                     mime="application/json",
                     use_container_width=True
                 )
     else:
-        st.info("👈 Please upload a screenshot above to execute the Dashboard audit flow.")
+        st.info("👈 Please upload a ZIP project archive above to run the code deficiency audit.")
