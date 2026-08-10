@@ -397,7 +397,7 @@ if st.session_state.page == "main":
             </div>
             <div class="team-card">
                 <div class="team-name">Amna Mudassar Ali</div>
-                <div class="team-role">Technical Supervisor</div>
+                <div class="team-role">Technical Lead</div>
                 <div class="team-reg">Registration No: 016809</div>
             </div>
             <div class="team-card">
